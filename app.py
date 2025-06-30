@@ -4,12 +4,11 @@ import plotly.express as px
 from fpdf import FPDF
 import io
 import os
-import base64
 import re
-from io import StringIO
-from pdfminer.high_level import extract_text
 from dotenv import load_dotenv
 import google.generativeai as genai
+import pdfplumber
+from streamlit_javascript import st_javascript
 
 # Load environment variables
 load_dotenv()
@@ -18,66 +17,43 @@ load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 model = genai.GenerativeModel("gemini-1.5-flash")
 
-# Streamlit page settings
 st.set_page_config(page_title="Bank Transaction Analyzer", layout="wide")
 st.title("🏦 Bank Transaction Analyzer + Smart Saving Advisor")
 
-# Toggle for chatbot
-show_bot = st.toggle("🤖 Ask BankBuddy")
-user_q = ""
-response_text = ""
+# Toggle for BankBuddy (placed at top)
+scroll_trigger = st.toggle("🤖 Ask BankBuddy (Scroll to Chatbot Below)")
+
+if scroll_trigger:
+    st_javascript("window.location.href = '#footer';")
 
 st.sidebar.header("📁 Upload Your Bank or Wallet Statement")
-st.sidebar.markdown("Supported formats: `.csv`, `.xlsx`, `.pdf`, PhonePe, GPay, Paytm, ICICI, HDFC, SBI, Axis, Kotak and more.")
+st.sidebar.markdown("Supported formats: `.csv`, `.xlsx`, `.pdf` (Kotak, SBI, etc.)")
 
 uploaded_file = st.sidebar.file_uploader("⬆️ Upload File Here", type=["csv", "xlsx", "pdf"])
 
+
 def parse_kotak_pdf(pdf_file):
-    text = extract_text(pdf_file)
-    lines = text.splitlines()
-    data = []
-    pattern = r"(\d{2}-[A-Za-z]{3}-\d{4})\s+(.+?)\s+(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)?\s+(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)"
+    try:
+        with pdfplumber.open(pdf_file) as pdf:
+            text = "\n".join(page.extract_text() for page in pdf.pages if page.extract_text())
 
-    for line in lines:
-        match = re.match(pattern, line.strip())
-        if match:
-            date, desc, debit, credit, balance = match.groups()
-            amt = 0
-            if credit:
-                amt = float(credit.replace(",", ""))
-            elif debit:
-                amt = -float(debit.replace(",", ""))
-            data.append({
-                "date": pd.to_datetime(date, errors='coerce'),
-                "description": desc.strip(),
-                "amount": amt
-            })
+        lines = text.split('\n')
+        transactions = []
 
-    return pd.DataFrame(data)
+        for line in lines:
+            match = re.match(r'(\d{2}-\d{2}-\d{4})\s+(.+?)\s+([\d,]+\.\d{2})\((Cr|Dr)\)', line)
+            if match:
+                date = pd.to_datetime(match.group(1), dayfirst=True)
+                desc = match.group(2).strip()
+                amount = float(match.group(3).replace(',', ''))
+                if match.group(4) == "Dr":
+                    amount = -amount
+                transactions.append({"date": date, "description": desc, "amount": amount})
+        return pd.DataFrame(transactions)
+    except Exception as e:
+        st.error(f"❌ PDF parsing failed: {e}")
+        return pd.DataFrame()
 
-def generate_pdf(income, expense, savings, recommendations, investment_ideas):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", size=12)
-    pdf.cell(200, 10, txt="Bank Transaction Summary Report", ln=True, align="C")
-    pdf.ln(10)
-    pdf.cell(200, 10, txt=f"Total Income: Rs. {income:,.0f}", ln=True)
-    pdf.cell(200, 10, txt=f"Total Expense: Rs. {expense:,.0f}", ln=True)
-    pdf.cell(200, 10, txt=f"Total Savings: Rs. {savings:,.0f}", ln=True)
-    pdf.ln(10)
-    pdf.set_font("Arial", style='B', size=12)
-    pdf.cell(200, 10, txt="Recommendations:", ln=True)
-    pdf.set_font("Arial", size=12)
-    for rec in recommendations:
-        pdf.multi_cell(0, 10, txt=rec.encode('latin-1', errors='ignore').decode('latin-1'))
-    pdf.ln(5)
-    pdf.set_font("Arial", style='B', size=12)
-    pdf.cell(200, 10, txt="Investment Suggestions:", ln=True)
-    pdf.set_font("Arial", size=12)
-    for idea in investment_ideas:
-        pdf.multi_cell(0, 10, txt=idea.encode('latin-1', errors='ignore').decode('latin-1'))
-    pdf_output = pdf.output(dest='S').encode('latin-1', errors='ignore')
-    return pdf_output
 
 if uploaded_file:
     with st.spinner("Processing your file..."):
@@ -92,13 +68,11 @@ if uploaded_file:
                 st.error("Unsupported file type.")
                 st.stop()
 
-            st.success("✅ File uploaded and read successfully.")
-
-            df.columns = [col.lower().strip() for col in df.columns]
-            if 'date' not in df.columns or 'amount' not in df.columns:
-                st.error("❌ File must contain at least 'date' and 'amount' columns.")
+            if df.empty or 'date' not in df.columns or 'amount' not in df.columns:
+                st.error("❌ Parsed file does not contain usable 'date' and 'amount' columns. Please upload a supported format.")
                 st.stop()
 
+            df.columns = [col.lower().strip() for col in df.columns]
             df['date'] = pd.to_datetime(df['date'], errors='coerce')
             df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
             df = df.dropna(subset=['date', 'amount'])
@@ -173,7 +147,8 @@ if uploaded_file:
                     diff = percent - ideal
                     over_amount = expense * diff / 100
                     recommendations.append(
-                        f"⚠️ You spent {percent:.1f}% on {category} (ideal: {ideal}%). Try reducing by ₹{over_amount:,.0f}.")
+                        f"⚠️ You spent **{percent:.1f}%** on **{category}** (ideal: {ideal}%). Try reducing by **₹{over_amount:,.0f}**."
+                    )
 
             if recommendations:
                 st.markdown("### 🔎 You can save more by:")
@@ -181,13 +156,6 @@ if uploaded_file:
                     st.markdown(rec)
             else:
                 st.success("✅ You're spending within ideal limits. Great job!")
-
-            investment_ideas = [
-                "Start a SIP in mutual funds with at least ₹1000/month.",
-                "Use a recurring deposit to lock monthly savings.",
-                "Avoid unnecessary subscriptions and impulse buys.",
-                "Track credit card spending limits and set alerts."
-            ]
 
             st.markdown("---")
             st.subheader("📈 Projected Monthly Savings")
@@ -201,39 +169,31 @@ if uploaded_file:
             else:
                 st.success("You're saving a healthy amount. Keep it up!")
 
-            st.subheader("📤 Export Report")
-            if st.button("📄 Generate PDF Report"):
-                try:
-                    pdf_bytes = generate_pdf(income, expense, savings, recommendations, investment_ideas)
-                    b64 = base64.b64encode(pdf_bytes).decode()
-                    href = f'<a href="data:application/octet-stream;base64,{b64}" download="smart_saving_report.pdf">Download Report</a>'
-                    st.markdown(href, unsafe_allow_html=True)
-                except Exception as e:
-                    st.error(f"Something went wrong while generating PDF: {e}")
+            # Footer anchor for chatbot
+            st.markdown("<div id='footer'></div>", unsafe_allow_html=True)
 
-            if show_bot:
-                st.subheader("💬 Ask BankBuddy")
-                user_q = st.text_input("Type your question to BankBuddy")
-                ask_button = st.button("Ask")
+            st.subheader("🤖 BankBuddy AI Assistant")
 
-                if ask_button and user_q:
-                    df_sample = df[['category', 'amount']].head(5).to_csv(index=False)
-                    prompt = f"""
+            user_q = st.text_input("💬 Ask your financial question to BankBuddy:")
+            ask_button = st.button("Ask BankBuddy")
+
+            if ask_button and user_q:
+                df_sample = df.head(10).to_csv(index=False)
+                prompt = f"""
 You are BankBuddy, a smart financial assistant.
-Below is a small sample of the user's recent transactions:
+Here is a sample of user's bank data:
 {df_sample}
-User asked: "{user_q}"
-Provide a helpful, friendly, and concise answer.
+User asked: {user_q}
+Please answer briefly, helpfully, and with tips.
 """
-                    try:
-                        with st.spinner("💭 BankBuddy is thinking..."):
-                            response = model.generate_content(prompt)
-                            response_text = response.text.strip()
-                            st.markdown(f"**BankBuddy says:** {response_text}")
-                    except Exception as e:
-                        st.error(f"Something went wrong: {e}")
+                try:
+                    response = model.generate_content(prompt)
+                    response_text = response.text.strip()
+                    st.markdown(f"**BankBuddy says:** {response_text}")
+                except Exception as e:
+                    st.error(f"Something went wrong: {e}")
 
         except Exception as e:
             st.error(f"Something went wrong: {e}")
 else:
-    st.info("📂 Please upload a bank or wallet statement from the sidebar to get started.")
+    st.info("📂 Please upload a bank or wallet statement to get started.")
