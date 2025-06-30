@@ -8,7 +8,6 @@ import re
 from dotenv import load_dotenv
 import google.generativeai as genai
 import pdfplumber
-from streamlit_javascript import st_javascript
 
 # Load environment variables
 load_dotenv()
@@ -20,18 +19,16 @@ model = genai.GenerativeModel("gemini-1.5-flash")
 st.set_page_config(page_title="Bank Transaction Analyzer", layout="wide")
 st.title("🏦 Bank Transaction Analyzer + Smart Saving Advisor")
 
-# Toggle for BankBuddy (placed at top)
-scroll_trigger = st.toggle("🤖 Ask BankBuddy (Scroll to Chatbot Below)")
+# Toggle to show chatbot + Scroll Link
+if st.toggle("🤖 Ask BankBuddy (Scroll to Chatbot Below)"):
+    st.markdown('<a href="#footer">⬇️ Scroll to Chatbot</a>', unsafe_allow_html=True)
 
-if scroll_trigger:
-    st_javascript("window.location.href = '#footer';")
-
+# Sidebar file upload
 st.sidebar.header("📁 Upload Your Bank or Wallet Statement")
 st.sidebar.markdown("Supported formats: `.csv`, `.xlsx`, `.pdf` (Kotak, SBI, etc.)")
-
 uploaded_file = st.sidebar.file_uploader("⬆️ Upload File Here", type=["csv", "xlsx", "pdf"])
 
-
+# PDF parsing for Kotak-style statements
 def parse_kotak_pdf(pdf_file):
     try:
         with pdfplumber.open(pdf_file) as pdf:
@@ -54,7 +51,7 @@ def parse_kotak_pdf(pdf_file):
         st.error(f"❌ PDF parsing failed: {e}")
         return pd.DataFrame()
 
-
+# Main logic
 if uploaded_file:
     with st.spinner("Processing your file..."):
         try:
@@ -169,9 +166,10 @@ if uploaded_file:
             else:
                 st.success("You're saving a healthy amount. Keep it up!")
 
-            # Footer anchor for chatbot
+            # Footer ID for scroll target
             st.markdown("<div id='footer'></div>", unsafe_allow_html=True)
 
+            # --- Chatbot Section ---
             st.subheader("🤖 BankBuddy AI Assistant")
 
             user_q = st.text_input("💬 Ask your financial question to BankBuddy:")
